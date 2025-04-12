@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT 数据监控</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 20px;
+        }
+        .panel {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+            margin-top: 0;
+        }
+        .status {
+            margin-bottom: 20px;
+        }
+        .connected-clients {
+            margin-top: 20px;
+        }
+        .client-item {
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .message-log {
+            height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            background-color: #fafafa;
+            font-family: monospace;
+        }
+        .message {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+            background-color: #f0f0f0;
+        }
+        .coordinates-container {
+            margin-top: 20px;
+        }
+        .coordinate {
+            display: inline-block;
+            margin: 5px;
+            padding: 5px 10px;
+            background-color: #e3f2fd;
+            border-radius: 4px;
+        }
+        #canvas {
+            border: 1px solid #ddd;
+            background-color: white;
+            margin-top: 20px;
+        }
+        .frequency-data {
+            margin-top: 20px;
+        }
+
+        .freq-meter {
+            width: 100%;
+            height: 20px;
+            background-color: #e0e0e0;
+            border-radius: 10px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .freq-level {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        .freq-history-item {
+            display: inline-block;
+            margin: 3px;
+            padding: 3px 6px;
+            background-color: #e3f2fd;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="panel">
+            <h1>MQTT 监控面板</h1>
+            
+            <div class="status">
+                <h2>服务器状态</h2>
+                <p>WebSocket 连接: <span id="ws-status">未连接</span></p>
+                <p>MQTT 消息总数: <span id="message-count">0</span></p>
+            </div>
+            
+            <div class="connected-clients">
+                <h2>已连接客户端</h2>
+                <div id="clients-list"></div>
+            </div>
+            
+            <div class="config-data">
+                <h2>最新配置</h2>
+                <div id="config-display">暂无配置数据</div>
+            </div>
+            
+            <!-- 新增频率显示区域 -->
+            <div class="frequency-data">
+                <h2>频率数据</h2>
+                <div id="frequency-display">
+                    <p>当前频率: <span id="current-freq">未接收</span></p>
+                    <p>历史频率: <span id="freq-history">无</span></p>
+                </div>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>实时消息</h2>
+            <div class="message-log" id="message-log"></div>
+            
+            <div class="coordinates-container">
+                <h2>坐标数据</h2>
+                <div id="coordinates-display"></div>
+                <canvas id="canvas" width="800" height="500"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 初始化WebSocket连接
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}`;
+        const socket = new WebSocket(wsUrl);
+        
+        const wsStatus = document.getElementById('ws-status');
+        const messageCount = document.getElementById('message-count');
+        const clientsList = document.getElementById('clients-list');
+        const messageLog = document.getElementById('message-log');
+        const configDisplay = document.getElementById('config-display');
+        const coordinatesDisplay = document.getElementById('coordinates-display');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let totalMessages = 0;
+        const connectedClients = new Map();
+        
+        // WebSocket事件处理
+        socket.onopen = () => {
+            wsStatus.textContent = '已连接';
+            wsStatus.style.color = 'green';
+            logMessage('WebSocket连接已建立');
+        };
+        
+        socket.onclose = () => {
+            wsStatus.textContent = '已断开';
+            wsStatus.style.color = 'red';
+            logMessage('WebSocket连接已关闭');
+        };
+        
+        socket.onerror = (error) => {
+            logMessage(`WebSocket错误: ${error.message}`);
+        };
+        
+        socket.onmessage = (event) => {
+            totalMessages++;
+            messageCount.textContent = totalMessages;
+            const data = JSON.parse(event.data);
+            
+            switch(data.type) {
+                case 'client':
+                    updateClientList(data);
+                    break;
+                case 'message':
+                    logMessage(`[${data.topic}] ${data.payload} (来自: ${data.clientId})`);
+                    break;
+                case 'config':
+                    displayConfig(data.data);
+                    break;
+                case 'coordinates':
+                    displayCoordinates(data.data);
+                    break;
+                case 'frequency':
+                    displayFreq(data.data);
+                    break;
+                default:
+                    logMessage(`未知消息类型: ${data.type}`);
+            }
+        };
+        
+        // 更新客户端列表
+        function updateClientList(data) {
+            if (data.status === 'connected') {
+                connectedClients.set(data.id, data);
+            } else if (data.status === 'disconnected') {
+                connectedClients.delete(data.id);
+            }
+            
+            clientsList.innerHTML = '';
+            connectedClients.forEach(client => {
+                const clientItem = document.createElement('div');
+                clientItem.className = 'client-item';
+                clientItem.textContent = `${client.id} (${client.status})`;
+                clientsList.appendChild(clientItem);
+            });
+        }
+        
+        // 显示配置数据
+        function displayConfig(config) {
+            configDisplay.innerHTML = `
+                <p><strong>设备:</strong> ${config.device || '未知'}</p>
+                <p><strong>版本:</strong> ${config.version || '未知'}</p>
+                <p><strong>间隔:</strong> ${config.interval || '未设置'}</p>
+                <p><strong>状态:</strong> ${config.status || '未知'}</p>
+            `;
+        }
+        
+        // 显示坐标数据
+        function displayCoordinates(coordsArray) {
+            coordinatesDisplay.innerHTML = '';
+            
+            // 验证输入数据
+            if (!Array.isArray(coordsArray) || coordsArray.length % 2 !== 0) {
+                coordinatesDisplay.textContent = '无效的坐标数据（需要偶数个数值）';
+                return;
+            }
+
+            // 清空画布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制坐标系（固定0-40M范围）
+            drawCoordinateSystem();
+
+            // 提取所有x,y值并计算范围
+            const xValues = [];
+            const yValues = [];
+            for (let i = 0; i < coordsArray.length; i += 2) {
+                xValues.push(coordsArray[i]);
+                yValues.push(coordsArray[i + 1]);
+            }
+
+            const xMin = Math.min(...xValues);   // 固定x范围0-40
+            const xMax = Math.max(...xValues);
+            const yMin = Math.min(...yValues);
+            const yMax = Math.max(...yValues);
+
+            // 绘制坐标点和连线
+            ctx.beginPath();
+            for (let i = 0; i < coordsArray.length; i += 2) {
+                const x = coordsArray[i];
+                const y = coordsArray[i + 1];
+
+                // 创建文本显示
+                // const coordElement = document.createElement('div');
+                // coordElement.className = 'coordinate-item';
+                // coordElement.textContent = `点${i/2}: (${x.toFixed(1)}, ${y.toFixed(1)})`;
+                // coordinatesDisplay.appendChild(coordElement);
+
+                // 计算画布位置
+                const canvasX = 50 + ((x-xMin) / 100 * (canvas.width - 100));
+                const canvasY = canvas.height - 50 - ((y - yMin) / (yMax - yMin) * (canvas.height - 100));
+
+                // 绘制点
+                if (i === 0) {
+                    ctx.moveTo(canvasX, canvasY);
+                } else {
+                    console.log(canvasX)
+                    ctx.lineTo(canvasX, canvasY);
+                }
+
+                // 绘制点标记
+                ctx.fillStyle = 'blue';
+                ctx.fillRect(canvasX - 2, canvasY - 2, 4, 4);
+            }
+
+            // 绘制连线
+            ctx.strokeStyle = 'rgba(255, 165, 0, 0.7)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 显示统计信息
+            const statsElement = document.createElement('div');
+            statsElement.className = 'coordinate-stats';
+            statsElement.innerHTML = `
+                <strong>统计信息：</strong>
+                点数: ${xValues.length} | 
+                X范围: ${xMin.toFixed(1)}-${xMax.toFixed(1)} | 
+                Y范围: ${yMin.toFixed(1)}-${yMax.toFixed(1)}
+            `;
+            coordinatesDisplay.prepend(statsElement);
+        }
+
+        // 绘制坐标系的辅助函数
+        function drawCoordinateSystem() {
+            ctx.strokeStyle = '#ccc';
+            ctx.lineWidth = 1;
+            
+            // X轴（0-40M）
+            ctx.beginPath();
+            ctx.moveTo(50, canvas.height - 50);
+            ctx.lineTo(canvas.width - 50, canvas.height - 50);
+            
+            // 刻度标记（每5M一个刻度）
+            for (let i = 0; i <= 40; i += 5) {
+                const xPos = 50 + (i / 40 * (canvas.width - 100));
+                ctx.moveTo(xPos, canvas.height - 50);
+                ctx.lineTo(xPos, canvas.height - 45);
+                ctx.fillStyle = 'black';
+                ctx.fillText(`${i}M`, xPos - 5, canvas.height - 30);
+            }
+            ctx.stroke();
+
+            // Y轴（动态范围）
+            ctx.beginPath();
+            ctx.moveTo(50, 50);
+            ctx.lineTo(50, canvas.height - 50);
+            ctx.stroke();
+        }
+                
+        // 记录消息到日志
+        function logMessage(message) {
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message';
+            messageElement.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            messageLog.appendChild(messageElement);
+            messageLog.scrollTop = messageLog.scrollHeight;
+        }
+    </script>
+</body>
+</html> 
